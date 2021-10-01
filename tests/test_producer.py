@@ -9,7 +9,7 @@ from unittest import mock
 from kafka.cluster import ClusterMetadata
 
 from ._testutil import (
-    KafkaIntegrationTestCase, run_until_complete, kafka_versions
+    KafkaIntegrationTestCase, run_until_complete, run_in_thread, kafka_versions
 )
 
 from aiokafka.protocol.produce import ProduceResponse
@@ -42,7 +42,7 @@ class TestKafkaProducerIntegration(KafkaIntegrationTestCase):
         self.assertNotEqual(producer.client.api_version, 'auto')
         partitions = await producer.partitions_for('some_topic_name')
         self.assertEqual(len(partitions), 2)
-        self.assertEqual(partitions, set([0, 1]))
+        self.assertEqual(partitions, {0, 1})
         await producer.stop()
         self.assertEqual(producer._closed, True)
 
@@ -133,11 +133,28 @@ class TestKafkaProducerIntegration(KafkaIntegrationTestCase):
         with self.assertRaises(ProducerClosed):
             await producer.send(self.topic, b'value', key=b'KEY')
 
+    @run_in_thread
+    def test_create_producer_no_running_loop(self):
+        loop = asyncio.new_event_loop()
+        with pytest.deprecated_call():
+            producer = AIOKafkaProducer(bootstrap_servers=self.hosts, loop=loop)
+        loop.run_until_complete(producer.start())
+        try:
+            future = loop.run_until_complete(
+                producer.send(self.topic, b'hello, Kafka!', partition=0))
+            resp = loop.run_until_complete(future)
+            self.assertEqual(resp.topic, self.topic)
+            self.assertTrue(resp.partition in (0, 1))
+            self.assertEqual(resp.offset, 0)
+        finally:
+            loop.run_until_complete(producer.stop())
+
     @run_until_complete
     async def test_producer_context_manager(self):
         producer = AIOKafkaProducer(
             bootstrap_servers=self.hosts)
-        async with producer:
+        async with producer as prod:
+            assert prod is producer
             assert producer._sender._sender_task is not None
             await producer.send(self.topic, b'value', key=b'KEY')
         assert producer._closed
@@ -146,7 +163,8 @@ class TestKafkaProducerIntegration(KafkaIntegrationTestCase):
         producer = AIOKafkaProducer(
             bootstrap_servers=self.hosts)
         with pytest.raises(ValueError):
-            async with producer:
+            async with producer as prod:
+                assert prod is producer
                 assert producer._sender._sender_task is not None
                 await producer.send(self.topic, b'value', key=b'KEY')
                 raise ValueError()
@@ -371,7 +389,7 @@ class TestKafkaProducerIntegration(KafkaIntegrationTestCase):
         context = self.create_ssl_context()
         producer = AIOKafkaProducer(
             bootstrap_servers=[
-                "{}:{}".format(self.kafka_host, self.kafka_ssl_port)],
+                f"{self.kafka_host}:{self.kafka_ssl_port}"],
             security_protocol="SSL", ssl_context=context)
         await producer.start()
         await producer.send_and_wait(topic=topic, value=b"Super msg")

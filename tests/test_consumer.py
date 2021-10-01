@@ -27,7 +27,7 @@ from aiokafka.errors import (
 
 from ._testutil import (
     KafkaIntegrationTestCase, StubRebalanceListener,
-    run_until_complete, random_string, kafka_versions)
+    run_until_complete, run_in_thread, random_string, kafka_versions)
 
 
 class TestConsumerIntegration(KafkaIntegrationTestCase):
@@ -115,6 +115,21 @@ class TestConsumerIntegration(KafkaIntegrationTestCase):
 
         # will ignore, no exception expected
         await consumer.stop()
+
+    @run_in_thread
+    def test_create_consumer_no_running_loop(self):
+        loop = asyncio.new_event_loop()
+        with pytest.deprecated_call():
+            consumer = AIOKafkaConsumer(
+                self.topic, bootstrap_servers=self.hosts, loop=loop)
+        loop.run_until_complete(consumer.start())
+        try:
+            loop.run_until_complete(
+                self.send_messages(0, list(range(0, 10))))
+            for _ in range(10):
+                loop.run_until_complete(consumer.getone())
+        finally:
+            loop.run_until_complete(consumer.stop())
 
     @run_until_complete
     async def test_consumer_context_manager(self):
@@ -456,7 +471,7 @@ class TestConsumerIntegration(KafkaIntegrationTestCase):
             msg = await consumer.getone()
             result.append(msg.value)
         self.assertEqual(set(msgs2), set(result))
-        self.assertEqual(consumer.subscription(), set([self.topic]))
+        self.assertEqual(consumer.subscription(), {self.topic})
 
     @run_until_complete
     async def test_subscribe_errors(self):
@@ -750,11 +765,11 @@ class TestConsumerIntegration(KafkaIntegrationTestCase):
         await self.send_messages(0, [1, 2, 3])
 
         context = self.create_ssl_context()
-        group = "group-{}".format(self.id())
+        group = f"group-{self.id()}"
         consumer = AIOKafkaConsumer(
             self.topic, group_id=group,
             bootstrap_servers=[
-                "{}:{}".format(self.kafka_host, self.kafka_ssl_port)],
+                f"{self.kafka_host}:{self.kafka_ssl_port}"],
             enable_auto_commit=True,
             auto_offset_reset="earliest",
             security_protocol="SSL", ssl_context=context)
@@ -831,12 +846,12 @@ class TestConsumerIntegration(KafkaIntegrationTestCase):
             await consumer.commit({tp: 1000})
 
         consumer = AIOKafkaConsumer(
-            group_id='group-{}'.format(self.id()),
+            group_id=f'group-{self.id()}',
             bootstrap_servers=self.hosts)
         await consumer.start()
         self.add_cleanup(consumer.stop)
 
-        consumer.subscribe(topics=set([self.topic]))
+        consumer.subscribe(topics={self.topic})
         with self.assertRaisesRegex(
                 IllegalStateError, "No partitions assigned"):
             await consumer.commit({tp: 1000})
@@ -922,7 +937,7 @@ class TestConsumerIntegration(KafkaIntegrationTestCase):
     @run_until_complete
     async def test_consumer_group_without_subscription(self):
         consumer = AIOKafkaConsumer(
-            group_id='group-{}'.format(self.id()),
+            group_id=f'group-{self.id()}',
             bootstrap_servers=self.hosts,
             enable_auto_commit=False,
             auto_offset_reset='earliest',
@@ -1082,8 +1097,8 @@ class TestConsumerIntegration(KafkaIntegrationTestCase):
         assign1 = await listener1.wait_assign()
         assign2 = await listener2.wait_assign()
         # We expect 2 partitons for autocreated topics
-        my_partitions = set([
-            TopicPartition(my_topic, 0), TopicPartition(my_topic, 1)])
+        my_partitions = {
+            TopicPartition(my_topic, 0), TopicPartition(my_topic, 1)}
         self.assertEqual(assign1 | assign2, my_partitions)
         self.assertEqual(
             consumer1.assignment() | consumer2.assignment(),
@@ -1099,9 +1114,9 @@ class TestConsumerIntegration(KafkaIntegrationTestCase):
         assign1 = await listener1.wait_assign()
         assign2 = await listener2.wait_assign()
         # We expect 2 partitons for autocreated topics
-        my_partitions = set([
+        my_partitions = {
             TopicPartition(my_topic, 0), TopicPartition(my_topic, 1),
-            TopicPartition(my_topic2, 0), TopicPartition(my_topic2, 1)])
+            TopicPartition(my_topic2, 0), TopicPartition(my_topic2, 1)}
         self.assertEqual(assign1 | assign2, my_partitions)
         self.assertEqual(
             consumer1.assignment() | consumer2.assignment(),
@@ -1319,8 +1334,8 @@ class TestConsumerIntegration(KafkaIntegrationTestCase):
         self.assertEqual(msg.value, b"0")
         msg = await consumer1.getone(tp1)
         self.assertEqual(msg.value, b"10")
-        listener1.revoke_mock.assert_called_with(set([]))
-        listener1.assign_mock.assert_called_with(set([tp0, tp1]))
+        listener1.revoke_mock.assert_called_with(set())
+        listener1.assign_mock.assert_called_with({tp0, tp1})
 
         # By adding a 2nd consumer we trigger rebalance
         consumer2 = AIOKafkaConsumer(
@@ -1335,23 +1350,23 @@ class TestConsumerIntegration(KafkaIntegrationTestCase):
         msg1 = await consumer1.getone()
         msg2 = await consumer2.getone()
         # We can't predict the assignment in test
-        if consumer1.assignment() == set([tp1]):
+        if consumer1.assignment() == {tp1}:
             msg1, msg2 = msg2, msg1
-            c1_assignment = set([tp1])
-            c2_assignment = set([tp0])
+            c1_assignment = {tp1}
+            c2_assignment = {tp0}
         else:
-            c1_assignment = set([tp0])
-            c2_assignment = set([tp1])
+            c1_assignment = {tp0}
+            c2_assignment = {tp1}
 
         self.assertEqual(msg1.value, b"1")
         self.assertEqual(msg2.value, b"11")
 
-        listener1.revoke_mock.assert_called_with(set([tp0, tp1]))
+        listener1.revoke_mock.assert_called_with({tp0, tp1})
         self.assertEqual(listener1.revoke_mock.call_count, 2)
         listener1.assign_mock.assert_called_with(c1_assignment)
         self.assertEqual(listener1.assign_mock.call_count, 2)
 
-        listener2.revoke_mock.assert_called_with(set([]))
+        listener2.revoke_mock.assert_called_with(set())
         self.assertEqual(listener2.revoke_mock.call_count, 1)
         listener2.assign_mock.assert_called_with(c2_assignment)
         self.assertEqual(listener2.assign_mock.call_count, 1)

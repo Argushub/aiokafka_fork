@@ -25,7 +25,7 @@ log = logging.getLogger(__name__)
 _missing = object()
 
 
-class AIOKafkaProducer(object):
+class AIOKafkaProducer:
     """A Kafka client that publishes records to the Kafka cluster.
 
     The producer consists of a pool of buffer space that holds records that
@@ -131,7 +131,8 @@ class AIOKafkaProducer(object):
             If set to 'auto', will attempt to infer the broker version by
             probing various APIs. Default: auto
         security_protocol (str): Protocol used to communicate with brokers.
-            Valid values are: PLAINTEXT, SSL. Default: PLAINTEXT.
+            Valid values are: PLAINTEXT, SSL, SASL_PLAINTEXT, SASL_SSL.
+            Default: PLAINTEXT.
         ssl_context (ssl.SSLContext): pre-configured SSLContext for wrapping
             socket connections. Directly passed into asyncio's
             `create_connection`_. For more information see :ref:`ssl_auth`.
@@ -192,6 +193,13 @@ class AIOKafkaProducer(object):
                  sasl_oauth_token_provider=None):
         if loop is None:
             loop = get_running_loop()
+        else:
+            warnings.warn("The loop argument is deprecated since 0.7.1, "
+                          "and scheduled for removal in 0.8.0",
+                          DeprecationWarning, stacklevel=2)
+        if loop.get_debug():
+            self._source_traceback = traceback.extract_stack(sys._getframe(1))
+        self._loop = loop
 
         if acks not in (0, 1, -1, 'all', _missing):
             raise ValueError("Invalid ACKS parameter")
@@ -256,23 +264,21 @@ class AIOKafkaProducer(object):
         self._metadata = self.client.cluster
         self._message_accumulator = MessageAccumulator(
             self._metadata, max_batch_size, compression_attrs,
-            self._request_timeout_ms / 1000, txn_manager=self._txn_manager)
+            self._request_timeout_ms / 1000, txn_manager=self._txn_manager,
+            loop=loop)
         self._sender = Sender(
             self.client, acks=acks, txn_manager=self._txn_manager,
             retry_backoff_ms=retry_backoff_ms, linger_ms=linger_ms,
             message_accumulator=self._message_accumulator,
             request_timeout_ms=request_timeout_ms)
 
-        self._loop = loop
-        if loop.get_debug():
-            self._source_traceback = traceback.extract_stack(sys._getframe(1))
         self._closed = False
 
     # Warn if producer was not closed properly
     # We don't attempt to close the Consumer, as __del__ is synchronous
     def __del__(self, _warnings=warnings):
         if self._closed is False:
-            _warnings.warn("Unclosed AIOKafkaProducer {!r}".format(self),
+            _warnings.warn(f"Unclosed AIOKafkaProducer {self!r}",
                            ResourceWarning,
                            source=self)
             context = {'producer': self,
@@ -283,7 +289,7 @@ class AIOKafkaProducer(object):
 
     async def start(self):
         """Connect to Kafka cluster and check server version"""
-        assert self._loop is asyncio.get_event_loop(), (
+        assert self._loop is get_running_loop(), (
             "Please create objects with the same loop as running with"
         )
         log.debug("Starting the Kafka producer")  # trace
@@ -556,6 +562,7 @@ class AIOKafkaProducer(object):
 
     async def __aenter__(self):
         await self.start()
+        return self
 
     async def __aexit__(self, exc_type, exc, tb):
         await self.stop()

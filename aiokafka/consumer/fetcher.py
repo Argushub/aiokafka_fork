@@ -53,7 +53,7 @@ class OffsetResetStrategy:
         if value == cls.NONE:
             return "none"
         else:
-            return "timestamp({})".format(value)
+            return f"timestamp({value})"
 
 
 class FetchResult:
@@ -145,8 +145,7 @@ class FetchResult:
         return self._partition_records is not None
 
     def __repr__(self):
-        return "<FetchResult position={!r}>".format(
-            self._partition_records.next_fetch_offset)
+        return f"<FetchResult position={self._partition_records.next_fetch_offset!r}>"
 
 
 class FetchError:
@@ -166,7 +165,7 @@ class FetchError:
         raise self._error
 
     def __repr__(self):
-        return "<FetchError error={!r}>".format(self._error)
+        return f"<FetchError error={self._error!r}>"
 
 
 class PartitionRecords:
@@ -213,7 +212,7 @@ class PartitionRecords:
                 # This iterator will be closed after the exception, so we don't
                 # try to drain other batches here. They will be refetched.
                 raise Errors.CorruptRecordException(
-                    "Invalid CRC - {tp}".format(tp=tp))
+                    f"Invalid CRC - {tp}")
 
             if self._isolation_level == READ_COMMITTED and \
                     next_batch.producer_id is not None:
@@ -221,7 +220,10 @@ class PartitionRecords:
 
                 if next_batch.is_control_batch:
                     if self._contains_abort_marker(next_batch):
-                        self._aborted_producers.remove(next_batch.producer_id)
+                        # Using `discard` instead of `remove`, because Kafka
+                        # may return an abort marker for an otherwise empty
+                        # topic-partition.
+                        self._aborted_producers.discard(next_batch.producer_id)
 
                 if next_batch.is_transactional and \
                         next_batch.producer_id in self._aborted_producers:
@@ -368,6 +370,7 @@ class Fetcher:
             auto_offset_reset='latest',
             isolation_level="read_uncommitted"):
         self._client = client
+        self._loop = client._loop
         self._key_deserializer = key_deserializer
         self._value_deserializer = value_deserializer
         self._fetch_min_bytes = fetch_min_bytes
@@ -388,7 +391,7 @@ class Fetcher:
             self._isolation_level = READ_COMMITTED
         else:
             raise ValueError(
-                "Incorrect isolation level {}".format(isolation_level))
+                f"Incorrect isolation level {isolation_level}")
 
         self._records = collections.OrderedDict()
         self._in_flight = set()
@@ -440,7 +443,7 @@ class Fetcher:
         # Creating a fetch waiter is usually not that frequent of an operation,
         # (get methods will return all data first, before a waiter is created)
 
-        fut = create_future()
+        fut = self._loop.create_future()
         self._fetch_waiters.add(fut)
         fut.add_done_callback(
             lambda f, waiters=self._fetch_waiters: waiters.remove(f))

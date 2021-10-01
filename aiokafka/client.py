@@ -23,7 +23,7 @@ from aiokafka.errors import (
     UnrecognizedBrokerVersion,
     StaleMetadata)
 from aiokafka.util import (
-    create_task, create_future, parse_kafka_version, get_running_loop
+    create_future, create_task, parse_kafka_version, get_running_loop
 )
 from aiokafka.protocol.group import SyncGroupRequest
 
@@ -74,7 +74,8 @@ class AIOKafkaClient:
             If set to 'auto', will attempt to infer the broker version by
             probing various APIs. Default: auto
         security_protocol (str): Protocol used to communicate with brokers.
-            Valid values are: PLAINTEXT, SSL. Default: PLAINTEXT.
+            Valid values are: PLAINTEXT, SSL, SASL_PLAINTEXT, SASL_SSL.
+            Default: PLAINTEXT.
         ssl_context (ssl.SSLContext): pre-configured SSLContext for wrapping
             socket connections. For more information see :ref:`ssl_auth`.
             Default: None.
@@ -149,8 +150,14 @@ class AIOKafkaClient:
         self._sync_task = None
 
         self._md_update_fut = None
-        self._md_update_waiter = create_future()
-        self._get_conn_lock = asyncio.Lock()
+        self._md_update_waiter = loop.create_future()
+        self._get_conn_lock_value = None
+
+    @property
+    def _get_conn_lock(self):
+        if self._get_conn_lock_value is None:
+            self._get_conn_lock_value = asyncio.Lock()
+        return self._get_conn_lock_value
 
     def __repr__(self):
         return '<AIOKafkaClient client_id=%s>' % self._client_id
@@ -184,7 +191,7 @@ class AIOKafkaClient:
 
     async def bootstrap(self):
         """Try to to bootstrap initial cluster metadata"""
-        assert self._loop is asyncio.get_event_loop(), (
+        assert self._loop is get_running_loop(), (
             "Please create objects with the same loop as running with"
         )
         # using request v0 for bootstrap if not sure v1 is available
@@ -241,7 +248,7 @@ class AIOKafkaClient:
             break
         else:
             raise KafkaConnectionError(
-                'Unable to bootstrap from {}'.format(self.hosts))
+                f'Unable to bootstrap from {self.hosts}')
 
         # detect api version if need
         if self._api_version == 'auto':
@@ -345,7 +352,7 @@ class AIOKafkaClient:
             # Wake up the `_md_synchronizer` task
             if not self._md_update_waiter.done():
                 self._md_update_waiter.set_result(None)
-            self._md_update_fut = create_future()
+            self._md_update_fut = self._loop.create_future()
         # Metadata will be updated in the background by syncronizer
         return asyncio.shield(self._md_update_fut)
 
@@ -365,7 +372,7 @@ class AIOKafkaClient:
             topic (str): topic to track
         """
         if topic in self._topics:
-            res = create_future()
+            res = self._loop.create_future()
             res.set_result(True)
         else:
             res = self.force_metadata_update()
@@ -382,7 +389,7 @@ class AIOKafkaClient:
         if not topics or set(topics).difference(self._topics):
             res = self.force_metadata_update()
         else:
-            res = create_future()
+            res = self._loop.create_future()
             res.set_result(True)
         self._topics = set(topics)
         return res
@@ -539,12 +546,12 @@ class AIOKafkaClient:
         conn = await self._get_conn(node_id, no_hint=True)
         if conn is None:
             raise KafkaConnectionError(
-                "No connection to node with id {}".format(node_id))
+                f"No connection to node with id {node_id}")
         for version, request in test_cases:
             try:
                 if not conn.connected():
                     await conn.connect()
-                assert conn, 'no connection to node with id {}'.format(node_id)
+                assert conn, f'no connection to node with id {node_id}'
                 # request can be ignored by Kafka broker,
                 # so we send metadata request and wait response
                 task = create_task(conn.send(request))
@@ -587,10 +594,10 @@ class AIOKafkaClient:
 
         error_type = Errors.for_code(response.error_code)
         assert error_type is Errors.NoError, "API version check failed"
-        max_versions = dict([
-            (api_key, max_version)
+        max_versions = {
+            api_key: max_version
             for api_key, _, max_version in response.api_versions
-        ])
+        }
         # Get the best match of test cases
         for broker_version, api_key, version in test_cases:
             if max_versions.get(api_key, -1) >= version:
